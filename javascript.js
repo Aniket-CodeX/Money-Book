@@ -18,13 +18,18 @@ const state = {
   app: "",
   minAmount: "",
   maxAmount: "",
+  fromDate: "",
+  toDate: "",
   sort: "newest"
 };
 
 const $ = id => document.getElementById(id);
-const money = value => "₹" + Number(value || 0).toLocaleString("en-IN", {
-  maximumFractionDigits: 2
-});
+const money = value => {
+  const n = Number(value || 0);
+  return (n < 0 ? "−" : "") + "₹" + Math.abs(n).toLocaleString("en-IN", {
+    maximumFractionDigits: 2
+  });
+};
 
 function escapeHtml(value) {
   return String(value ?? "").replace(/[&<>'"]/g, char => ({
@@ -116,6 +121,8 @@ async function saveOpeningBalance() {
   await renderAll();
 }
 
+const allTx = () => getAll("transactions");
+
 async function recalculateBalances() {
   const rows = (await getAll("transactions")).sort((a,b) => {
     return new Date(a.date) - new Date(b.date) || Number(a.id) - Number(b.id);
@@ -123,14 +130,22 @@ async function recalculateBalances() {
 
   let balance = await getOpeningBalance();
 
-  for (const tx of rows) {
+  rows.forEach(tx => {
     balance += tx.direction === "sent"
       ? -Number(tx.amount || 0)
       : Number(tx.amount || 0);
+    tx.closing = Math.round(balance * 100) / 100;
+  });
 
-    tx.closing = balance;
-    await putRecord("transactions", tx);
-  }
+  // Write everything in one transaction (faster and all-or-nothing)
+  await new Promise((resolve, reject) => {
+    const t = state.db.transaction("transactions", "readwrite");
+    const store = t.objectStore("transactions");
+    rows.forEach(tx => store.put(tx));
+    t.oncomplete = () => resolve();
+    t.onerror = () => reject(t.error);
+    t.onabort = () => reject(t.error);
+  });
 }
 
 async function addTransaction(tx) {
@@ -170,7 +185,7 @@ function transactionHtml(tx) {
 
 async function renderHome() {
   const rows = (await getAll("transactions")).sort(
-    (a,b) => new Date(b.date) - new Date(a.date)
+    (a,b) => new Date(b.date) - new Date(a.date) || Number(b.id) - Number(a.id)
   );
 
   let sent = 0, received = 0;
@@ -226,7 +241,7 @@ function renderChart(rows) {
 
   const max = Math.max(...values, 1);
   $("chart").innerHTML = values.map(value => {
-    const height = Math.max(8, value / max * 100);
+    const height = value > 0 ? Math.max(8, value / max * 100) : 0;
     return `<div class="bar" style="--h:${height}%"></div>`;
   }).join("");
 
@@ -272,6 +287,9 @@ function getFilteredTransactions(rows) {
     const amount = Number(tx.amount || 0);
     const min = state.minAmount === "" ? null : Number(state.minAmount);
     const max = state.maxAmount === "" ? null : Number(state.maxAmount);
+    const when = new Date(tx.date);
+    const from = state.fromDate ? new Date(state.fromDate + "T00:00:00") : null;
+    const to = state.toDate ? new Date(state.toDate + "T23:59:59.999") : null;
 
     return (
       (state.transactionFilter === "all" || tx.direction === state.transactionFilter) &&
@@ -279,15 +297,18 @@ function getFilteredTransactions(rows) {
       (!state.category || tx.category === state.category) &&
       (!state.app || tx.upi === state.app) &&
       (min === null || amount >= min) &&
-      (max === null || amount <= max)
+      (max === null || amount <= max) &&
+      (!from || when >= from) &&
+      (!to || when <= to)
     );
   });
 
   result.sort((a,b) => {
-    if (state.sort === "oldest") return new Date(a.date) - new Date(b.date);
-    if (state.sort === "high") return Number(b.amount) - Number(a.amount);
-    if (state.sort === "low") return Number(a.amount) - Number(b.amount);
-    return new Date(b.date) - new Date(a.date);
+    const byId = Number(b.id) - Number(a.id);
+    if (state.sort === "oldest") return new Date(a.date) - new Date(b.date) || -byId;
+    if (state.sort === "high") return Number(b.amount) - Number(a.amount) || byId;
+    if (state.sort === "low") return Number(a.amount) - Number(b.amount) || byId;
+    return new Date(b.date) - new Date(a.date) || byId;
   });
 
   return result;
@@ -304,13 +325,34 @@ async function renderTransactions() {
   $("filterSummary").textContent =
     `${filtered.length} transaction${filtered.length === 1 ? "" : "s"} shown`;
 
+  $("transactionSearch").value = state.search;
   $("filterCategory").value = state.category;
   $("filterApp").value = state.app;
   $("minAmount").value = state.minAmount;
   $("maxAmount").value = state.maxAmount;
+  $("fromDate").value = state.fromDate;
+  $("toDate").value = state.toDate;
   $("sortTransactions").value = state.sort;
+  document.querySelectorAll("[data-direction-filter]").forEach(item =>
+    item.classList.toggle("active", item.dataset.directionFilter === state.transactionFilter)
+  );
+  if (state.category || state.app || state.minAmount !== "" || state.maxAmount !== "" ||
+      state.fromDate || state.toDate) {
+    $("advancedFilters").classList.remove("hidden");
+  }
 
   bindTransactionClicks($("allTransactions"));
+}
+
+function resetFilters() {
+  state.transactionFilter = "all";
+  state.search = "";
+  state.category = "";
+  state.app = "";
+  state.minAmount = "";
+  state.maxAmount = "";
+  state.fromDate = "";
+  state.toDate = "";
 }
 
 async function renderAnalysis() {
@@ -320,6 +362,7 @@ async function renderAnalysis() {
   const appTotals = {};
   const people = {};
   const monthly = {};
+  const monthLabels = {};
   let largestSent = 0;
   let sentCount = 0;
 
@@ -344,10 +387,12 @@ async function renderAnalysis() {
         people[person].total += amount;
       }
 
-      const month = new Date(tx.date).toLocaleDateString("en-IN", {
+      const d = new Date(tx.date);
+      const monthKey = d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0");
+      monthLabels[monthKey] = d.toLocaleDateString("en-IN", {
         month:"short", year:"numeric"
       });
-      monthly[month] = (monthly[month] || 0) + amount;
+      monthly[monthKey] = (monthly[monthKey] || 0) + amount;
     } else {
       received += amount;
     }
@@ -402,12 +447,8 @@ async function renderAnalysis() {
 
   $("categoryAnalysis").querySelectorAll("[data-category]").forEach(button => {
     button.onclick = () => {
+      resetFilters();
       state.category = button.dataset.category;
-      state.transactionFilter = "all";
-      state.search = "";
-      state.app = "";
-      state.minAmount = "";
-      state.maxAmount = "";
       navigate(1);
     };
   });
@@ -423,14 +464,15 @@ async function renderAnalysis() {
 
   $("appAnalysis").querySelectorAll("[data-app]").forEach(button => {
     button.onclick = () => {
+      resetFilters();
       state.app = button.dataset.app;
-      state.category = "";
       navigate(1);
     };
   });
 
-  const monthEntries = Object.entries(monthly);
-  monthEntries.reverse();
+  const monthEntries = Object.entries(monthly)
+    .sort((a,b) => b[0].localeCompare(a[0]))
+    .map(([key,total]) => [monthLabels[key], total]);
 
   $("monthlyAnalysis").innerHTML = monthEntries.length
     ? monthEntries.map(([month,total]) => `
@@ -549,22 +591,28 @@ async function backupData() {
   );
 }
 
-function downloadBlob(content, filename, type) {
-  const blob = new Blob([content], {type});
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement("a");
-  link.href = url;
-  link.download = filename;
-  link.click();
-  URL.revokeObjectURL(url);
-}
-
 async function restoreData(file) {
   const data = JSON.parse(await file.text());
 
-  if (!Array.isArray(data.transactions)) {
+  if (!data || !Array.isArray(data.transactions)) {
     throw new Error("Invalid backup file.");
   }
+
+  const clean = data.transactions.map((tx, i) => {
+    const amount = Number(tx?.amount);
+    if (!tx || !tx.date || Number.isNaN(new Date(tx.date).getTime()) ||
+        !(amount > 0) || !["sent","received"].includes(tx.direction)) {
+      throw new Error(`Transaction #${i + 1} in the backup is missing a valid date, amount or direction.`);
+    }
+    return {
+      ...tx,
+      amount,
+      details: String(tx.details ?? ""),
+      upi: tx.upi ?? "",
+      category: tx.category ?? "Other",
+      notes: tx.notes ?? ""
+    };
+  });
 
   await clearStore("transactions");
   await clearStore("settings");
@@ -574,7 +622,7 @@ async function restoreData(file) {
     value:Number(data.openingBalance || 0)
   });
 
-  for (const tx of data.transactions) {
+  for (const tx of clean) {
     const copy = {...tx};
     delete copy.id;
     await addRecord("transactions", copy);
@@ -700,6 +748,16 @@ function wireEvents() {
     renderTransactions();
   };
 
+  $("fromDate").onchange = event => {
+    state.fromDate = event.target.value;
+    renderTransactions();
+  };
+
+  $("toDate").onchange = event => {
+    state.toDate = event.target.value;
+    renderTransactions();
+  };
+
   $("sortTransactions").onchange = event => {
     state.sort = event.target.value;
     renderTransactions();
@@ -764,8 +822,10 @@ async function init() {
   try {
     populateSelects();
     wireEvents();
+    setupExports();
     await openDB();
     await renderAll();
+    runDueAutoPdf();
   } catch (error) {
     console.error(error);
     alert("My Money Tracker could not open its local database.");
@@ -773,3 +833,232 @@ async function init() {
 }
 
 document.addEventListener("DOMContentLoaded", init);
+
+
+/* PDF statement export + offline recurring statements */
+const AUTO_PDF_KEY = "myMoneyTrackerAutoPdf";
+
+function readAutoPdfConfig() {
+  try {
+    return JSON.parse(localStorage.getItem(AUTO_PDF_KEY) || "{}") || {};
+  } catch {
+    return {};
+  }
+}
+
+function writeAutoPdfConfig(config) {
+  try {
+    localStorage.setItem(AUTO_PDF_KEY, JSON.stringify(config));
+  } catch (error) {
+    console.error(error);
+  }
+}
+
+function pdfSafe(value) {
+  // Output is pure ASCII: printable chars as-is (with PDF escaping), Latin-1 as octal escapes
+  return Array.from(String(value ?? "")).map(ch => {
+    const code = ch.charCodeAt(0);
+    if (ch === "\\" || ch === "(" || ch === ")") return "\\" + ch;
+    if (code >= 0x20 && code <= 0x7E) return ch;
+    if (code >= 0xA0 && code <= 0xFF) return "\\" + code.toString(8).padStart(3, "0");
+    return "?";
+  }).join("");
+}
+
+function pdfText(value, max = 42) {
+  // Truncate first so an escape sequence is never cut in half
+  const text = String(value ?? "");
+  const cut = text.length > max ? text.slice(0, Math.max(0, max - 1)) + "…" : text;
+  return pdfSafe(cut.replace(/…/g, "..."));
+}
+
+function pdfDate(value) {
+  const d = new Date(value);
+  return d.toLocaleDateString("en-IN", { day: "2-digit", month: "2-digit", year: "numeric" }) +
+    " " + d.toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" });
+}
+
+function pdfMoney(value) {
+  return "INR " + Number(value || 0).toLocaleString("en-IN", { maximumFractionDigits: 2 });
+}
+
+function makePdf(rows) {
+  const W = 842, H = 595, margin = 24, rowH = 20, headerH = 28;
+  const cols = [
+    { n: "Date / Time", w: 100 }, { n: "Details", w: 145 }, { n: "UPI", w: 80 },
+    { n: "Category", w: 82 }, { n: "Type", w: 58 }, { n: "Amount", w: 75 },
+    { n: "Balance", w: 82 }, { n: "Notes", w: 140 }
+  ];
+  const pageRows = Math.max(1, Math.floor((H - 38 - 35 - headerH - 40) / rowH));
+  const sorted = [...rows].sort((a, b) => new Date(a.date) - new Date(b.date) || Number(a.id) - Number(b.id));
+  const pages = [];
+  for (let i = 0; i < sorted.length || i === 0; i += pageRows) pages.push(sorted.slice(i, i + pageRows));
+
+  const objects = [];
+  const add = value => { objects.push(value); return objects.length; };
+  const fontId = add("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>");
+  const pagesId = add(null);
+  const pageIds = [];
+  const contentIds = [];
+
+  const drawPage = (page, pageNo) => {
+    let y = H - 38;
+    let content = `BT /F1 15 Tf ${margin} ${y} Td (My Money Tracker - Transaction Statement) Tj ET\n`;
+    content += `BT /F1 8 Tf ${margin} ${y - 16} Td (Generated offline on ${pdfSafe(new Date().toLocaleString("en-IN"))}) Tj ET\n`;
+    y -= 35;
+    let x = margin;
+    const totalWidth = cols.reduce((sum, col) => sum + col.w, 0);
+    content += `0.88 g ${x} ${y - headerH + 5} ${totalWidth} ${headerH} re f 0 g\n`;
+    cols.forEach(col => {
+      content += `BT /F1 8 Tf ${x} ${y - 17} Td (${pdfText(col.n, 40)}) Tj ET\n`;
+      x += col.w;
+    });
+    y -= headerH;
+
+    page.forEach(row => {
+      x = margin;
+      content += `${x} ${y} m ${margin + totalWidth} ${y} l S\n`;
+      const values = [
+        pdfDate(row.date), row.details, row.upi, row.category,
+        row.direction === "sent" ? "Sent" : "Received", pdfMoney(row.amount),
+        pdfMoney(row.closing), row.notes || ""
+      ];
+      values.forEach((value, i) => {
+        content += `BT /F1 7 Tf ${x} ${y - 14} Td (${pdfText(value, Math.floor(cols[i].w / 3.8))}) Tj ET\n`;
+        x += cols[i].w;
+      });
+      y -= rowH;
+    });
+    content += `BT /F1 7 Tf ${margin} 18 Td (Page ${pageNo} of ${pages.length}) Tj ET\n`;
+    return content;
+  };
+
+  pages.forEach((page, index) => {
+    const stream = drawPage(page, index + 1);
+    const contentId = add(`<< /Length ${stream.length} >>\nstream\n${stream}endstream`);
+    contentIds.push(contentId);
+    pageIds.push(add(null));
+  });
+
+  objects[pagesId - 1] = `<< /Type /Pages /Kids [${pageIds.map(id => `${id} 0 R`).join(" ")}] /Count ${pageIds.length} >>`;
+  pageIds.forEach((pageId, index) => {
+    objects[pageId - 1] = `<< /Type /Page /Parent ${pagesId} 0 R /MediaBox [0 0 ${W} ${H}] /Resources << /Font << /F1 ${fontId} 0 R >> >> /Contents ${contentIds[index]} 0 R >>`;
+  });
+
+  const catalogId = add(`<< /Type /Catalog /Pages ${pagesId} 0 R >>`);
+  let output = "%PDF-1.4\n";
+  const offsets = [0];
+  objects.forEach((object, index) => {
+    offsets[index + 1] = output.length;
+    output += `${index + 1} 0 obj\n${object}\nendobj\n`;
+  });
+  const xref = output.length;
+  output += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n`;
+  for (let i = 1; i <= objects.length; i++) output += `${String(offsets[i]).padStart(10, "0")} 00000 n \n`;
+  output += `trailer\n<< /Size ${objects.length + 1} /Root ${catalogId} 0 R >>\nstartxref\n${xref}\n%%EOF`;
+  return new Blob([output], { type: "application/pdf" });
+}
+
+function downloadBlob(content, filename, type) {
+  const blob = content instanceof Blob ? content : new Blob([content], {type});
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  link.style.display = "none";
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1500);
+}
+
+async function downloadPdfStatement(reason = "manual") {
+  const rows = await allTx();
+  if (!rows.length) {
+    alert("No transactions to export yet.");
+    return false;
+  }
+  const filename = `my-money-statement-${new Date().toISOString().slice(0, 10)}.pdf`;
+  downloadBlob(makePdf(rows), filename);
+
+  const existing = readAutoPdfConfig();
+  writeAutoPdfConfig({
+    enabled: !!existing.enabled,
+    interval: existing.interval || "daily",
+    last: Date.now()
+  });
+  return true;
+}
+
+async function downloadCsvStatement() {
+  const rows = (await allTx()).sort((a, b) => new Date(a.date) - new Date(b.date));
+  const escapeCsv = value => `"${String(value ?? "").replace(/"/g, '""')}"`;
+  const data = [
+    ["Date & Time", "Transaction Details", "UPI App", "Category", "Type", "Amount", "Closing Balance", "Notes"],
+    ...rows.map(row => [
+      new Date(row.date).toLocaleString("en-IN"), row.details, row.upi, row.category,
+      row.direction === "sent" ? "Sent" : "Received", row.amount, row.closing, row.notes
+    ])
+  ];
+  const csv = data.map(row => row.map(escapeCsv).join(",")).join("\n");
+  downloadBlob(new Blob([csv], { type: "text/csv;charset=utf-8" }), `my-money-statement-${new Date().toISOString().slice(0, 10)}.csv`);
+}
+
+function dueAutoPdf(config) {
+  if (!config.enabled) return false;
+  const elapsed = Date.now() - Number(config.last || 0);
+  if (config.interval === "daily") return elapsed >= 86400000;
+  if (config.interval === "weekly") return elapsed >= 604800000;
+  if (config.interval === "monthly") return elapsed >= 2592000000;
+  return false;
+}
+
+function autoPdfStatusText(config) {
+  return config.enabled
+    ? `Automatic PDF: ${config.interval} (page must stay open).`
+    : "Automatic PDF is off.";
+}
+
+function setupAutoPdf() {
+  const checkbox = $("autoPdfEnabled");
+  const interval = $("autoPdfInterval");
+  const status = $("autoPdfStatus");
+  if (!checkbox || !interval || !status) return;
+
+  const config = readAutoPdfConfig();
+  config.interval = config.interval || "daily";
+  checkbox.checked = !!config.enabled;
+  interval.value = config.interval;
+  status.textContent = autoPdfStatusText(config);
+
+  const save = () => {
+    // Re-read so a download made since page load keeps its `last` timestamp
+    const current = readAutoPdfConfig();
+    const next = { enabled: checkbox.checked, interval: interval.value, last: current.last || 0 };
+    writeAutoPdfConfig(next);
+    status.textContent = autoPdfStatusText(next);
+    return next;
+  };
+
+  checkbox.onchange = () => {
+    save();
+    if (checkbox.checked) downloadPdfStatement("auto").catch(console.error);
+  };
+  interval.onchange = save;
+}
+
+function runDueAutoPdf() {
+  const config = readAutoPdfConfig();
+  if (!dueAutoPdf(config)) return;
+  downloadPdfStatement("auto").then(done => {
+    const status = $("autoPdfStatus");
+    if (done && status) status.textContent = `Automatic PDF downloaded. Next: ${config.interval}.`;
+  }).catch(console.error);
+}
+
+function setupExports() {
+  $("downloadPdf").onclick = () => downloadPdfStatement().catch(error => alert(`PDF export failed: ${error.message}`));
+  $("downloadCsv").onclick = () => downloadCsvStatement().catch(error => alert(`CSV export failed: ${error.message}`));
+  setupAutoPdf();
+}
+
