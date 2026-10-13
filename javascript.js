@@ -1,6 +1,6 @@
 const APPS = [
   "Google Pay","Amazon Pay","Paytm","BHIM",
-  "SuperMoney","Navi","FamPay","PhonePe"
+  "SuperMoney","Navi","FamPay","PhonePe","Cash"
 ];
 
 const CATEGORIES = [
@@ -26,7 +26,9 @@ const state = {
 const $ = id => document.getElementById(id);
 const money = value => {
   const n = Number(value || 0);
-  return (n < 0 ? "−" : "") + "₹" + Math.abs(n).toLocaleString("en-IN", {
+  const abs = Math.abs(n);
+  return (n < 0 ? "−" : "") + "₹" + abs.toLocaleString("en-IN", {
+    minimumFractionDigits: Number.isInteger(Math.round(abs * 100) / 100) ? 0 : 2,
     maximumFractionDigits: 2
   });
 };
@@ -40,7 +42,7 @@ function escapeHtml(value) {
 function appEmoji(app) {
   return ({
     "Google Pay":"G","Amazon Pay":"A","Paytm":"P","BHIM":"B",
-    "SuperMoney":"S","Navi":"N","FamPay":"F","PhonePe":"P"
+    "SuperMoney":"S","Navi":"N","FamPay":"F","PhonePe":"P","Cash":"₹"
   })[app] || "₹";
 }
 
@@ -108,6 +110,15 @@ function clearStore(storeName) {
   });
 }
 
+function deleteRecord(storeName, key) {
+  return new Promise((resolve, reject) => {
+    const request = state.db.transaction(storeName, "readwrite")
+      .objectStore(storeName).delete(key);
+    request.onsuccess = () => resolve();
+    request.onerror = () => reject(request.error);
+  });
+}
+
 async function getOpeningBalance() {
   const rows = await getAll("settings");
   const setting = rows.find(x => x.key === "openingBalance");
@@ -134,7 +145,8 @@ async function recalculateBalances() {
     balance += tx.direction === "sent"
       ? -Number(tx.amount || 0)
       : Number(tx.amount || 0);
-    tx.closing = Math.round(balance * 100) / 100;
+    balance = Math.round(balance * 100) / 100;   // round every step so float error can't build up
+    tx.closing = balance;
   });
 
   // Write everything in one transaction (faster and all-or-nothing)
@@ -178,7 +190,7 @@ function transactionHtml(tx) {
         </div>
       </div>
       <div class="txn-amt ${tx.direction}">
-        ${tx.direction === "sent" ? "−" : "+"}${money(tx.amount).slice(1)}
+        ${tx.direction === "sent" ? "−" : "+"}${money(Math.abs(tx.amount))}
       </div>
     </article>`;
 }
@@ -200,9 +212,7 @@ async function renderHome() {
     ? money(rows[0].closing)
     : money(await getOpeningBalance());
 
-  $("monthLabel").textContent = new Date().toLocaleDateString("en-IN", {
-    month:"long", year:"numeric"
-  });
+  $("monthLabel").textContent = "Last 7 days";
 
   renderChart(rows);
 
@@ -270,7 +280,7 @@ function populateSelects() {
     ).join("");
 
   $("filterApp").innerHTML =
-    `<option value="">All UPI apps</option>` +
+    `<option value="">All payment methods</option>` +
     APPS.map(app =>
       `<option value="${escapeHtml(app)}">${escapeHtml(app)}</option>`
     ).join("");
@@ -336,13 +346,9 @@ async function renderTransactions() {
   document.querySelectorAll("[data-direction-filter]").forEach(item =>
     item.classList.toggle("active", item.dataset.directionFilter === state.transactionFilter)
   );
-  if (state.category || state.app || state.minAmount !== "" || state.maxAmount !== "" ||
-      state.fromDate || state.toDate) {
-    $("advancedFilters").classList.remove("hidden");
-  }
-
   bindTransactionClicks($("allTransactions"));
 }
+
 
 function resetFilters() {
   state.transactionFilter = "all";
@@ -428,7 +434,7 @@ async function renderAnalysis() {
         : "No sent transactions yet"}</span>
     </div>
     <div class="setting-row">
-      <strong>Which UPI app did I spend the most through?</strong>
+      <strong>Which payment method did I spend the most through?</strong>
       <span>${topApp
         ? `${escapeHtml(topApp[0])} · ${money(topApp[1])}`
         : "No spending data yet"}</span>
@@ -449,6 +455,7 @@ async function renderAnalysis() {
     button.onclick = () => {
       resetFilters();
       state.category = button.dataset.category;
+      $("advancedFilters").classList.remove("hidden");
       navigate(1);
     };
   });
@@ -460,12 +467,13 @@ async function renderAnalysis() {
         <strong>${escapeHtml(app)}</strong>
         <span>${money(total)} · Tap to filter transactions</span>
       </button>`).join("")
-    : `<div class="empty">Add sent transactions to see UPI app spending.</div>`;
+    : `<div class="empty">Add sent transactions to see payment method spending.</div>`;
 
   $("appAnalysis").querySelectorAll("[data-app]").forEach(button => {
     button.onclick = () => {
       resetFilters();
       state.app = button.dataset.app;
+      $("advancedFilters").classList.remove("hidden");
       navigate(1);
     };
   });
@@ -493,7 +501,7 @@ async function showTransactionDetail(id) {
       <div class="detail-item">
         <span>Amount</span>
         <strong class="detail-amount ${tx.direction}">
-          ${tx.direction === "sent" ? "−" : "+"}${money(tx.amount).slice(1)}
+          ${tx.direction === "sent" ? "−" : "+"}${money(Math.abs(tx.amount))}
         </strong>
       </div>
       <div class="detail-item">
@@ -505,7 +513,7 @@ async function showTransactionDetail(id) {
         <strong>${escapeHtml(tx.details)}</strong>
       </div>
       <div class="detail-item">
-        <span>UPI app</span>
+        <span>Payment method</span>
         <strong>${escapeHtml(tx.upi)}</strong>
       </div>
       <div class="detail-item">
@@ -524,8 +532,80 @@ async function showTransactionDetail(id) {
         <span>Notes</span>
         <strong>${tx.notes ? escapeHtml(tx.notes) : "No notes"}</strong>
       </div>
+    </div>
+    <div class="detail-actions">
+      <button type="button" class="save" id="editTransactionButton">Edit transaction</button>
     </div>`;
+  $("editTransactionButton").onclick = () => showEditTransactionForm(tx);
   $("detailModal").classList.add("open");
+}
+
+function showEditTransactionForm(tx) {
+  const appOptions = APPS.map(app =>
+    `<option value="${escapeHtml(app)}" ${tx.upi === app ? "selected" : ""}>${escapeHtml(app)}</option>`
+  ).join("");
+  const categoryOptions = CATEGORIES.map(category =>
+    `<option value="${escapeHtml(category)}" ${tx.category === category ? "selected" : ""}>${escapeHtml(category)}</option>`
+  ).join("");
+
+  $("detailContent").innerHTML = `
+    <form class="form" id="editTransactionForm">
+      <div class="field"><label for="editDate">Date & time</label><input id="editDate" type="datetime-local" value="${escapeHtml(localDateTimeValue(tx.date))}" required></div>
+      <div class="field"><label for="editDetails">Transaction details</label><input id="editDetails" value="${escapeHtml(tx.details)}" required></div>
+      <div class="field"><label for="editPaymentMethod">Payment Method</label><select id="editPaymentMethod">${appOptions}</select></div>
+      <div class="field"><label for="editCategory">Category</label><select id="editCategory">${categoryOptions}</select></div>
+      <div class="field"><label for="editDirection">Payment direction</label><select id="editDirection"><option value="sent" ${tx.direction === "sent" ? "selected" : ""}>Payment sent</option><option value="received" ${tx.direction === "received" ? "selected" : ""}>Payment received</option></select></div>
+      <div class="field"><label for="editAmount">Amount (₹)</label><input id="editAmount" type="number" min="0.01" step="0.01" value="${Number(tx.amount)}" required></div>
+      <div class="field"><label for="editNotes">Notes (optional)</label><textarea id="editNotes">${escapeHtml(tx.notes || "")}</textarea></div>
+      <div class="edit-actions"><button class="save" type="submit">Save changes</button><button class="small-button edit-cancel" type="button" id="cancelEditTransaction">Cancel</button><button class="small-button delete-transaction" type="button" id="deleteEditTransaction">Delete transaction</button></div>
+    </form>`;
+
+  $("cancelEditTransaction").onclick = () => showTransactionDetail(tx.id);
+  $("deleteEditTransaction").onclick = async () => {
+    const confirmed = confirm(`Delete this transaction?\n\n${tx.details} — ${money(tx.amount)}\n\nThis action cannot be undone.`);
+    if (!confirmed) return;
+    try {
+      await deleteRecord("transactions", tx.id);
+      await recalculateBalances();
+      $("detailModal").classList.remove("open");
+      await renderAll();
+    } catch (error) {
+      console.error(error);
+      alert("Could not delete the transaction. Please try again.");
+    }
+  };
+  $("editTransactionForm").onsubmit = async event => {
+    event.preventDefault();
+    const details = $("editDetails").value.trim();
+    const amount = Number($("editAmount").value);
+    if (!details) return alert("Please enter transaction details.");
+    if (!(amount > 0) || !Number.isFinite(amount)) return alert("Please enter a valid amount.");
+
+    const updated = {
+      ...tx,
+      date: $("editDate").value,
+      details,
+      upi: $("editPaymentMethod").value,
+      category: $("editCategory").value,
+      direction: $("editDirection").value,
+      amount,
+      notes: $("editNotes").value.trim(),
+      updatedAt: Date.now()
+    };
+    if (!updated.date || Number.isNaN(new Date(updated.date).getTime())) {
+      return alert("Please enter a valid date and time.");
+    }
+
+    try {
+      await putRecord("transactions", updated);
+      await recalculateBalances();
+      await renderAll();
+      await showTransactionDetail(updated.id);
+    } catch (error) {
+      console.error(error);
+      alert("Could not save the transaction changes. Please try again.");
+    }
+  };
 }
 
 function navigate(index) {
@@ -557,6 +637,7 @@ function openTransactionModal() {
   $("notes").value = "";
   $("closing").value = "Auto-calculated";
   state.direction = "sent";
+  $("category").value = "Food";
 
   document.querySelectorAll("[data-direction]").forEach((button,i) => {
     button.classList.toggle("active", i === 0);
@@ -619,7 +700,7 @@ async function restoreData(file) {
 
   await putRecord("settings", {
     key:"openingBalance",
-    value:Number(data.openingBalance || 0)
+    value:Math.max(0, Number(data.openingBalance) || 0)
   });
 
   for (const tx of clean) {
@@ -633,10 +714,17 @@ async function restoreData(file) {
   alert("Backup restored successfully.");
 }
 
+function csvCell(value) {
+  let text = String(value ?? "");
+  // Stop spreadsheet apps from running text such as "=SUM(...)" as a formula
+  if (/^[=+\-@\t\r]/.test(text) && typeof value === "string") text = "'" + text;
+  return `"${text.replace(/"/g, '""')}"`;
+}
+
 async function exportCSV() {
   const rows = await getAll("transactions");
   const headers = [
-    "Date & Time","Transaction Details","UPI App",
+    "Date & Time","Transaction Details","Payment Method",
     "Category","Payment","Amount","Closing Balance","Notes"
   ];
 
@@ -652,9 +740,7 @@ async function exportCSV() {
       tx.closing,
       tx.notes || ""
     ])
-  ].map(row => row.map(value =>
-    `"${String(value ?? "").replace(/"/g,'""')}"`
-  ).join(",")).join("\n");
+  ].map(row => row.map(csvCell).join(",")).join("\n");
 
   downloadBlob("\ufeff" + csv, "my-money-tracker.csv", "text/csv;charset=utf-8");
 }
@@ -713,6 +799,7 @@ function wireEvents() {
   document.querySelectorAll("[data-direction]").forEach(button => {
     button.onclick = () => {
       state.direction = button.dataset.direction;
+      $("category").value = state.direction === "received" ? "Income" : "Food";
       document.querySelectorAll("[data-direction]").forEach(item =>
         item.classList.toggle("active", item === button)
       );
@@ -800,17 +887,28 @@ function wireEvents() {
       return;
     }
 
-    await addTransaction({
-      date: $("date").value,
-      details,
-      upi: $("upi").value,
-      category: $("category").value,
-      direction: state.direction,
-      amount,
-      closing: 0,
-      notes: $("notes").value.trim(),
-      createdAt: Date.now()
-    });
+    if (!$("date").value || Number.isNaN(new Date($("date").value).getTime())) {
+      alert("Please enter a valid date and time.");
+      return;
+    }
+
+    try {
+      await addTransaction({
+        date: $("date").value,
+        details,
+        upi: $("upi").value,
+        category: $("category").value,
+        direction: state.direction,
+        amount,
+        closing: 0,
+        notes: $("notes").value.trim(),
+        createdAt: Date.now()
+      });
+    } catch (error) {
+      console.error(error);
+      alert("Could not save the transaction. Please try again.");
+      return;
+    }
 
     closeTransactionModal();
     await renderAll();
@@ -856,7 +954,14 @@ function writeAutoPdfConfig(config) {
 
 function pdfSafe(value) {
   // Output is pure ASCII: printable chars as-is (with PDF escaping), Latin-1 as octal escapes
-  return Array.from(String(value ?? "")).map(ch => {
+  const clean = String(value ?? "")
+    .replace(/[\u202F\u2009\u200A\u2007\u00A0]/g, " ")   // narrow/no-break spaces from toLocale*String
+    .replace(/\u20B9/g, "Rs ")                               // rupee sign is not in the PDF font
+    .replace(/[\u2012-\u2015\u2212]/g, "-")
+    .replace(/[\u2018\u2019]/g, "'")
+    .replace(/[\u201C\u201D]/g, '"')
+    .replace(/[\r\n\t]+/g, " ");
+  return Array.from(clean).map(ch => {
     const code = ch.charCodeAt(0);
     if (ch === "\\" || ch === "(" || ch === ")") return "\\" + ch;
     if (code >= 0x20 && code <= 0x7E) return ch;
@@ -868,8 +973,8 @@ function pdfSafe(value) {
 function pdfText(value, max = 42) {
   // Truncate first so an escape sequence is never cut in half
   const text = String(value ?? "");
-  const cut = text.length > max ? text.slice(0, Math.max(0, max - 1)) + "…" : text;
-  return pdfSafe(cut.replace(/…/g, "..."));
+  const cut = text.length > max ? text.slice(0, Math.max(0, max - 3)) + "..." : text;
+  return pdfSafe(cut);
 }
 
 function pdfDate(value) {
@@ -885,7 +990,7 @@ function pdfMoney(value) {
 function makePdf(rows) {
   const W = 842, H = 595, margin = 24, rowH = 20, headerH = 28;
   const cols = [
-    { n: "Date / Time", w: 100 }, { n: "Details", w: 145 }, { n: "UPI", w: 80 },
+    { n: "Date / Time", w: 100 }, { n: "Details", w: 145 }, { n: "Payment Method", w: 80 },
     { n: "Category", w: 82 }, { n: "Type", w: 58 }, { n: "Amount", w: 75 },
     { n: "Balance", w: 82 }, { n: "Notes", w: 140 }
   ];
@@ -975,7 +1080,7 @@ function downloadBlob(content, filename, type) {
 async function downloadPdfStatement(reason = "manual") {
   const rows = await allTx();
   if (!rows.length) {
-    alert("No transactions to export yet.");
+    if (reason === "manual") alert("No transactions to export yet.");
     return false;
   }
   const filename = `my-money-statement-${new Date().toISOString().slice(0, 10)}.pdf`;
@@ -992,16 +1097,16 @@ async function downloadPdfStatement(reason = "manual") {
 
 async function downloadCsvStatement() {
   const rows = (await allTx()).sort((a, b) => new Date(a.date) - new Date(b.date));
-  const escapeCsv = value => `"${String(value ?? "").replace(/"/g, '""')}"`;
+  const escapeCsv = csvCell;
   const data = [
-    ["Date & Time", "Transaction Details", "UPI App", "Category", "Type", "Amount", "Closing Balance", "Notes"],
+    ["Date & Time", "Transaction Details", "Payment Method", "Category", "Type", "Amount", "Closing Balance", "Notes"],
     ...rows.map(row => [
       new Date(row.date).toLocaleString("en-IN"), row.details, row.upi, row.category,
       row.direction === "sent" ? "Sent" : "Received", row.amount, row.closing, row.notes
     ])
   ];
   const csv = data.map(row => row.map(escapeCsv).join(",")).join("\n");
-  downloadBlob(new Blob([csv], { type: "text/csv;charset=utf-8" }), `my-money-statement-${new Date().toISOString().slice(0, 10)}.csv`);
+  downloadBlob(new Blob(["\ufeff" + csv], { type: "text/csv;charset=utf-8" }), `my-money-statement-${new Date().toISOString().slice(0, 10)}.csv`);
 }
 
 function dueAutoPdf(config) {
@@ -1042,7 +1147,11 @@ function setupAutoPdf() {
 
   checkbox.onchange = () => {
     save();
-    if (checkbox.checked) downloadPdfStatement("auto").catch(console.error);
+    if (checkbox.checked) {
+      downloadPdfStatement("auto").then(done => {
+        if (done) status.textContent = autoPdfStatusText(readAutoPdfConfig());
+      }).catch(console.error);
+    }
   };
   interval.onchange = save;
 }
