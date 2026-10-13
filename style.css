@@ -932,17 +932,3 @@ select, .setting-select {
   .hero { color: #000; background: #fff; box-shadow: none; --text: #000; --muted: #444; }
   .txn, .info-card, .setting-row { box-shadow: none; break-inside: avoid; }
 }
-
-
-/* Transaction detail editing */
-.detail-actions { display: grid; grid-template-columns: 1fr; margin-top: 16px; }
-.edit-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 4px; }
-.edit-actions .save, .edit-actions .small-button { width: 100%; margin-top: 0; }
-.edit-actions .delete-transaction {
-  grid-column: 1 / -1;
-  border: 1px solid var(--danger);
-  background: var(--danger-soft);
-  color: var(--danger);
-  font-weight: 700;
-}
-.edit-cancel { border: 1px solid var(--line); background: var(--surface2); color: var(--text); }
