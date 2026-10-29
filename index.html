@@ -12,12 +12,11 @@
   <div class="shell">
     <header class="top">
       <div class="brand">My Money</div>
-      <button class="icon" id="settingsButton" aria-label="Settings">⚙</button>
     </header>
 
     <section id="homeScreen" class="screen active">
-      <section class="hero">
-        <div class="eyebrow">Latest closing balance</div>
+      <section class="hero balance-clickable" id="balanceCard" role="button" tabindex="0" aria-label="Open bank balance and cash left details">
+        <div class="eyebrow">Latest closing balance <span class="balance-hint">· Tap to view breakdown ↗</span></div>
         <div class="balance" id="balance">₹0</div>
         <div class="stats">
           <div class="stat"><span>Received</span><strong class="received" id="received">₹0</strong></div>
@@ -48,10 +47,37 @@
       </section>
     </section>
 
+    <section id="balanceScreen" class="screen">
+      <div class="section-head">
+        <h2>Balance breakdown</h2>
+        <button class="link" id="backToHome">← Back to Home</button>
+      </div>
+      <p class="balance-description">Your money is separated by payment method. Online transactions affect Bank Balance; transactions made through Cash affect Cash Left.</p>
+      <div class="balance-breakdown-grid">
+        <article class="balance-detail-card bank-card">
+          <div class="balance-detail-icon">⌁</div>
+          <span>Bank Balance</span>
+          <strong id="bankBalance">₹0</strong>
+          <small>Starting balance + all non-cash transactions</small>
+        </article>
+        <article class="balance-detail-card cash-card">
+          <div class="balance-detail-icon">₹</div>
+          <span>Cash Left</span>
+          <strong id="cashLeft">₹0</strong>
+          <small>Net total of transactions made through Cash</small>
+        </article>
+      </div>
+      <article class="balance-total-card">
+        <span>Closing Balance</span>
+        <strong id="combinedBalance">₹0</strong>
+        <small>Bank Balance + Cash Left</small>
+      </article>
+      <div class="balance-note">Note: Your existing Starting balance is counted under Bank Balance. You can keep tracking cash separately by choosing <strong>Cash</strong> as the payment method for each cash transaction.</div>
+    </section>
+
     <section id="transactionsScreen" class="screen">
       <div class="section-head">
         <h2>Transactions</h2>
-        <button class="link" id="addFromTransactions">+ Add</button>
       </div>
 
       <input class="search" id="transactionSearch" type="search"
@@ -133,40 +159,15 @@
       </div>
 
       <div class="setting-row">
-        <strong>Backup</strong>
-        <span>Download all transactions and settings as JSON.</span>
-        <button class="wide-button" id="backupButton">Download JSON backup</button>
+        <strong>Export PDF</strong>
+        <span>Download a PDF statement with transactions grouped by month, latest month first.</span>
+        <button class="wide-button" id="downloadPdf">Export PDF</button>
       </div>
 
       <div class="setting-row">
-        <strong>Restore</strong>
-        <span>Replace the current local data with a JSON backup.</span>
-        <input id="restoreFile" type="file" accept="application/json,.json">
-      </div>
-
-      <div class="setting-row">
-        <strong>Export</strong>
-        <span>Export your transaction list as CSV.</span>
-        <button class="wide-button" id="csvButton">Export CSV</button>
-      </div>
-
-      <div class="setting-row">
-        <strong>PDF statements</strong>
-        <span>Download a formatted PDF statement containing your transactions.</span>
-        <div class="export-actions">
-          <button class="export-btn" id="downloadPdf">Download PDF statement</button>
-          <button class="export-btn secondary" id="downloadCsv">Download statement CSV</button>
-        </div>
-        <label class="auto-pdf-label">
-          <input id="autoPdfEnabled" type="checkbox">
-          Enable automatic PDF statements
-        </label>
-        <select id="autoPdfInterval" class="setting-select">
-          <option value="daily">Daily</option>
-          <option value="weekly">Weekly</option>
-          <option value="monthly">Monthly</option>
-        </select>
-        <span class="setting-note" id="autoPdfStatus">Automatic PDF is off.</span>
+        <strong>Restore using PDF</strong>
+        <span>Restore transactions from a PDF statement exported by My Money Tracker. You can replace current data or combine transactions.</span>
+        <input id="restorePdfFile" type="file" accept="application/pdf,.pdf">
       </div>
 
       <div class="setting-row">
